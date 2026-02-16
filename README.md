@@ -4,9 +4,13 @@
 
 Gives your AI assistant continuity, identity, and growth.
 
+[![CI](https://github.com/hxp-pxh/openclaw-persona/actions/workflows/ci.yml/badge.svg)](https://github.com/hxp-pxh/openclaw-persona/actions/workflows/ci.yml)
+[![npm version](https://badge.fury.io/js/openclaw-persona.svg)](https://www.npmjs.com/package/openclaw-persona)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 ## What is this?
 
-OpenClaw gives you a personal AI assistant. openclaw-persona gives it a **soul**.
+OpenClaw gives you a personal AI assistant. **openclaw-persona** gives it a soul.
 
 | Feature | Vanilla OpenClaw | + Persona |
 |---------|------------------|-----------|
@@ -17,74 +21,99 @@ OpenClaw gives you a personal AI assistant. openclaw-persona gives it a **soul**
 | **Delegation** | Manual prompts | Agent profiles with right tools |
 | **Proactive** | Waits for commands | Heartbeat checks, surfaces opportunities |
 
-## Install
+## Installation
 
 ```bash
 npm install -g openclaw-persona
 ```
 
+**Requirements:**
+- Node.js 18+
+- Python 3.8+ (for memory vault)
+- OpenClaw (any version that reads workspace files)
+
 ## Quick Start
 
 ```bash
 # Initialize a new workspace
-persona init ~/my-workspace
-
-# Or initialize in current directory
-cd ~/my-workspace
-persona init
+persona init ~/my-assistant --name "Jarvis"
 
 # Set up vector memory
+pip install chromadb sentence-transformers
 persona vmem index
 
 # Check status
 persona status
+
+# Start OpenClaw in the workspace
+cd ~/my-assistant
+openclaw gateway
 ```
 
-## Commands
+## What Gets Created
+
+```
+my-assistant/
+├── SOUL.md           # Identity, values, personality
+├── AGENTS.md         # Operating rules, autonomy
+├── USER.md           # Context about you
+├── MEMORY.md         # Long-term memories
+├── HEARTBEAT.md      # Periodic tasks
+├── IDENTITY.md       # Name, avatar
+├── agents/           # Subordinate profiles
+│   ├── researcher.md # Deep research
+│   ├── coder.md      # Implementation
+│   ├── scanner.md    # Quick lookups
+│   └── analyst.md    # Strategic thinking
+├── memory/           # Daily logs
+├── memory-vault/     # Vector storage
+├── .learnings/       # Self-improvement
+│   ├── ERRORS.md
+│   ├── LEARNINGS.md
+│   └── FEATURE_REQUESTS.md
+└── tasks/            # Active task tracking
+```
+
+## CLI Commands
 
 ### `persona init [workspace]`
 
-Scaffold a new persona workspace with:
-- `SOUL.md` — Identity and values
-- `AGENTS.md` — Operating instructions
-- `USER.md` — Context about your human
-- `HEARTBEAT.md` — Periodic tasks
-- `agents/` — Subordinate profiles
-- `.learnings/` — Self-improvement capture
-- `memory-vault/` — Vector memory storage
+Scaffold a new persona workspace.
 
-Options:
-- `--name <name>` — Name for your persona
-- `--force` — Overwrite existing files
+```bash
+persona init ~/my-assistant
+persona init --name "Jarvis"
+persona init --force  # Overwrite existing
+```
 
-### `persona vmem <action> [args]`
+### `persona vmem <action>`
 
-Vector memory operations:
+Vector memory operations.
 
 ```bash
 # Index all memory files
 persona vmem index
 
-# Search memories (returns summaries)
-persona vmem query "topic"
+# Search (returns summaries)
+persona vmem query "that decision about APIs"
 
 # Search with full text
-persona vmem query --full "topic"
+persona vmem query --full "API decision"
 
-# Get specific memory by ID
+# Get specific memory
 persona vmem get <id>
 
-# Add a memory
-persona vmem add "something I learned"
-persona vmem add --type=decision "chose X because Y"
+# Add memories
+persona vmem add "learned X is better than Y"
+persona vmem add --type=decision "chose X because..."
 
-# Find similar memories to consolidate
+# Find duplicates
 persona vmem consolidate
 
-# Delete a memory
+# Remove memory
 persona vmem delete <id>
 
-# Show stats
+# Statistics
 persona vmem stats
 ```
 
@@ -98,45 +127,38 @@ Update agent profiles to latest version.
 
 ## Memory Types
 
-When adding memories with `vmem add`, use types:
-
-- `observation` — General notes (default)
-- `decision` — Choices and reasoning
-- `lesson` — Things learned
-- `bugfix` — Fixes discovered
-- `discovery` — New capabilities found
-- `implementation` — How things were built
+| Type | Use For |
+|------|---------|
+| `observation` | General notes (default) |
+| `decision` | Choices and reasoning |
+| `lesson` | Things learned |
+| `bugfix` | Fixes discovered |
+| `discovery` | New capabilities |
+| `implementation` | How things were built |
 
 ## Agent Profiles
 
 Pre-built profiles for sub-agent delegation:
 
-| Profile | Use For |
-|---------|---------|
-| `researcher.md` | Deep research, multi-source investigation |
-| `coder.md` | Implementation, bug fixes, scripts |
-| `scanner.md` | Quick lookups, monitoring |
-| `analyst.md` | Strategic thinking, trade-offs |
+| Profile | Use For | Model |
+|---------|---------|-------|
+| researcher | Research, investigation | Sonnet |
+| coder | Implementation, scripts | Sonnet |
+| scanner | Quick lookups, monitoring | Haiku |
+| analyst | Strategy, decisions | Opus |
 
-## Requirements
-
-- Node.js 18+
-- Python 3.8+ (for memory vault)
-- OpenClaw (any version that reads workspace files)
-
-## Python Dependencies
-
-The memory vault requires Python packages:
-
-```bash
-pip install chromadb sentence-transformers
+**Usage in your assistant:**
+```python
+profile = read("agents/researcher.md")
+sessions_spawn(task=f"{profile}\n\n---\n\nTASK: Research X")
 ```
 
-Or use the included requirements:
+## Documentation
 
-```bash
-pip install -r memory-vault/requirements.txt
-```
+- [Getting Started](docs/getting-started.md)
+- [Memory System](docs/memory.md)
+- [Agent Profiles](docs/agents.md)
+- [Self-Improvement](docs/self-improvement.md)
 
 ## Philosophy
 
@@ -144,9 +166,15 @@ pip install -r memory-vault/requirements.txt
 
 The key insight: AI assistants don't need to start from scratch every session. With proper memory, identity, and self-improvement systems, they can develop genuine continuity.
 
+**The lobster molts.** 🦞
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
+
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE)
 
 ---
 
