@@ -15,6 +15,12 @@ Usage:
     
 Observation types: decision, lesson, bugfix, discovery, implementation, observation
 Memory areas: core, trading, infrastructure, personal, projects
+
+Path Resolution (in order):
+    1. VMEM_DIR environment variable
+    2. .vmem file in current directory (contains path)
+    3. memory-vault/ in current directory (if exists)
+    4. ~/.openclaw/memory/ (default)
 """
 
 import os
@@ -29,513 +35,493 @@ import chromadb
 from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 
+# Dynamic path resolution
+def get_vault_dir():
+    """Find the vault directory using priority-based resolution."""
+    # 1. Environment variable
+    if os.environ.get('VMEM_DIR'):
+        return Path(os.environ['VMEM_DIR'])
+    
+    # 2. Workspace config file (.vmem contains path)
+    cwd = Path.cwd()
+    config_file = cwd / '.vmem'
+    if config_file.exists():
+        configured_path = config_file.read_text().strip()
+        if configured_path:
+            return Path(configured_path).expanduser()
+    
+    # 3. Check for existing memory-vault in workspace
+    workspace_vault = cwd / 'memory-vault'
+    if workspace_vault.exists() and (workspace_vault / 'chroma_db').exists():
+        return workspace_vault
+    
+    # 4. Default to ~/.openclaw/memory
+    default_dir = Path.home() / '.openclaw' / 'memory'
+    default_dir.mkdir(parents=True, exist_ok=True)
+    return default_dir
+
+def get_workspace_dir():
+    """Find the workspace directory (where MEMORY.md etc. live)."""
+    # Check for .vmem or MEMORY.md in cwd
+    cwd = Path.cwd()
+    if (cwd / 'MEMORY.md').exists() or (cwd / '.vmem').exists():
+        return cwd
+    # Fall back to home
+    return Path.home()
+
 # Paths
-VAULT_DIR = Path(__file__).parent
-CLAWD_DIR = VAULT_DIR.parent
-MEMORY_DIR = CLAWD_DIR / "memory"
-LEARNINGS_DIR = CLAWD_DIR / ".learnings"
+VAULT_DIR = get_vault_dir()
+WORKSPACE_DIR = get_workspace_dir()
+MEMORY_DIR = WORKSPACE_DIR / "memory"
+LEARNINGS_DIR = WORKSPACE_DIR / ".learnings"
 CHROMA_DIR = VAULT_DIR / "chroma_db"
 
-# Files to index
-MEMORY_FILES = [
-    CLAWD_DIR / "MEMORY.md",
-    CLAWD_DIR / "SOUL.md",
-    CLAWD_DIR / "USER.md",
-    CLAWD_DIR / "TOOLS.md",
-    CLAWD_DIR / "AGENTS.md",
-    CLAWD_DIR / "HEARTBEAT.md",
-    CLAWD_DIR / "IDENTITY.md",
-]
+# Files to index (relative to workspace)
+def get_memory_files():
+    files = []
+    core_files = ["MEMORY.md", "SOUL.md", "USER.md", "TOOLS.md", "AGENTS.md", "HEARTBEAT.md", "IDENTITY.md"]
+    for f in core_files:
+        path = WORKSPACE_DIR / f
+        if path.exists():
+            files.append(path)
+    return files
+
+MEMORY_FILES = get_memory_files()
 
 # Observation types
-VALID_TYPES = ["decision", "lesson", "bugfix", "discovery", "implementation", "observation"]
+OBSERVATION_TYPES = {
+    'decision': 'Choices and decisions made',
+    'lesson': 'Lessons learned from experience',
+    'bugfix': 'Bug fixes and their solutions',
+    'discovery': 'New discoveries or insights',
+    'implementation': 'Implementation details',
+    'observation': 'General observations'
+}
 
-# Model - small and fast, good for semantic search
-MODEL_NAME = "all-MiniLM-L6-v2"
-
-
-def generate_summary(text: str, max_len: int = 100) -> str:
-    """Generate a one-line summary from text."""
-    # Clean up text
-    text = re.sub(r'\s+', ' ', text).strip()
-    
-    # Try to find a meaningful first sentence or section
-    # Look for first sentence
-    match = re.match(r'^(.+?[.!?])\s', text)
-    if match and len(match.group(1)) <= max_len:
-        return match.group(1)
-    
-    # Look for first line with content
-    lines = text.split('\n')
-    for line in lines:
-        line = line.strip()
-        if line and not line.startswith('#') and len(line) > 10:
-            if len(line) <= max_len:
-                return line
-            return line[:max_len-3] + "..."
-    
-    # Fall back to truncation
-    if len(text) <= max_len:
-        return text
-    return text[:max_len-3] + "..."
+# Memory areas for organization
+MEMORY_AREAS = ['core', 'trading', 'infrastructure', 'personal', 'projects']
 
 
 class MemoryVault:
-    def __init__(self):
+    def __init__(self, lazy_load=True):
         self.model = None
         self.client = None
         self.collection = None
+        if not lazy_load:
+            self._init_model()
+            self._init_db()
     
-    def _load_model(self):
+    def _init_model(self):
         if self.model is None:
             print("Loading embedding model...", file=sys.stderr)
-            self.model = SentenceTransformer(MODEL_NAME)
-        return self.model
+            self.model = SentenceTransformer('all-MiniLM-L6-v2')
     
-    def _get_collection(self):
-        if self.collection is None:
-            CHROMA_DIR.mkdir(exist_ok=True)
+    def _init_db(self):
+        if self.client is None:
+            CHROMA_DIR.mkdir(parents=True, exist_ok=True)
             self.client = chromadb.PersistentClient(path=str(CHROMA_DIR))
             self.collection = self.client.get_or_create_collection(
-                name="vesper_memory",
+                name="memories",
                 metadata={"hnsw:space": "cosine"}
             )
-        return self.collection
     
-    def _chunk_text(self, text: str, chunk_size: int = 500, overlap: int = 100) -> list[str]:
-        """Split text into overlapping chunks for better retrieval."""
-        words = text.split()
+    def _chunk_markdown(self, text: str, source: str, chunk_size: int = 500) -> list:
+        """Split markdown into semantic chunks."""
         chunks = []
-        for i in range(0, len(words), chunk_size - overlap):
-            chunk = " ".join(words[i:i + chunk_size])
-            if chunk.strip():
-                chunks.append(chunk)
-        return chunks
-    
-    def _hash_content(self, content: str) -> str:
-        return hashlib.md5(content.encode()).hexdigest()[:12]
-    
-    def index_file(self, filepath: Path) -> int:
-        """Index a single file, return number of chunks added."""
-        if not filepath.exists():
-            return 0
+        current_chunk = []
+        current_size = 0
+        current_headers = []
         
-        content = filepath.read_text()
-        chunks = self._chunk_text(content)
+        for line in text.split('\n'):
+            # Track headers for context
+            if line.startswith('#'):
+                level = len(line.split()[0])
+                header_text = line.lstrip('#').strip()
+                current_headers = current_headers[:level-1] + [header_text]
+            
+            line_size = len(line)
+            
+            # Start new chunk if too large
+            if current_size + line_size > chunk_size and current_chunk:
+                chunk_text = '\n'.join(current_chunk)
+                header_context = ' > '.join(current_headers) if current_headers else ''
+                chunks.append({
+                    'text': chunk_text,
+                    'source': source,
+                    'headers': header_context,
+                    'summary': self._summarize_chunk(chunk_text)
+                })
+                current_chunk = []
+                current_size = 0
+            
+            current_chunk.append(line)
+            current_size += line_size
         
-        if not chunks:
-            return 0
-        
-        model = self._load_model()
-        collection = self._get_collection()
-        
-        # Create embeddings
-        embeddings = model.encode(chunks).tolist()
-        
-        # Prepare data with summaries
-        ids = []
-        metadatas = []
-        for i, chunk in enumerate(chunks):
-            chunk_hash = self._hash_content(chunk)
-            doc_id = f"{filepath.stem}_{chunk_hash}_{i}"
-            ids.append(doc_id)
-            metadatas.append({
-                "source": str(filepath),
-                "chunk_idx": i,
-                "indexed_at": datetime.utcnow().isoformat(),
-                "summary": generate_summary(chunk),
-                "type": "file_chunk",
+        # Don't forget last chunk
+        if current_chunk:
+            chunk_text = '\n'.join(current_chunk)
+            header_context = ' > '.join(current_headers) if current_headers else ''
+            chunks.append({
+                'text': chunk_text,
+                'source': source,
+                'headers': header_context,
+                'summary': self._summarize_chunk(chunk_text)
             })
         
-        # Delete old entries from this file
-        existing = collection.get(where={"source": str(filepath)})
-        if existing["ids"]:
-            collection.delete(ids=existing["ids"])
+        return chunks
+    
+    def _summarize_chunk(self, text: str, max_len: int = 100) -> str:
+        """Create a brief summary of a chunk."""
+        # Take first meaningful line
+        for line in text.split('\n'):
+            line = line.strip()
+            if line and not line.startswith('#') and len(line) > 10:
+                if len(line) > max_len:
+                    return line[:max_len] + "..."
+                return line
+        return text[:max_len] + "..." if len(text) > max_len else text
+    
+    def index_files(self):
+        """Index all memory files into the vector store."""
+        self._init_model()
+        self._init_db()
         
-        # Add new entries
-        collection.add(
+        all_chunks = []
+        
+        # Index core files
+        for file_path in MEMORY_FILES:
+            if file_path.exists():
+                print(f"Indexing {file_path.name}...")
+                text = file_path.read_text()
+                chunks = self._chunk_markdown(text, file_path.name)
+                all_chunks.extend(chunks)
+        
+        # Index memory directory
+        if MEMORY_DIR.exists():
+            for md_file in MEMORY_DIR.glob("*.md"):
+                print(f"Indexing {md_file.name}...")
+                text = md_file.read_text()
+                chunks = self._chunk_markdown(text, f"memory/{md_file.name}")
+                all_chunks.extend(chunks)
+        
+        # Index learnings directory
+        if LEARNINGS_DIR.exists():
+            for md_file in LEARNINGS_DIR.glob("*.md"):
+                print(f"Indexing {md_file.name}...")
+                text = md_file.read_text()
+                chunks = self._chunk_markdown(text, f".learnings/{md_file.name}")
+                all_chunks.extend(chunks)
+        
+        if not all_chunks:
+            print("No files to index.")
+            return
+        
+        # Clear existing and add new
+        try:
+            self.client.delete_collection("memories")
+        except:
+            pass
+        self.collection = self.client.create_collection(
+            name="memories",
+            metadata={"hnsw:space": "cosine"}
+        )
+        
+        # Batch embed and add
+        texts = [c['text'] for c in all_chunks]
+        print(f"Embedding {len(texts)} chunks...")
+        embeddings = self.model.encode(texts, show_progress_bar=True)
+        
+        ids = [hashlib.md5(t.encode()).hexdigest()[:12] for t in texts]
+        metadatas = [{
+            'source': c['source'],
+            'headers': c['headers'],
+            'summary': c['summary'],
+            'indexed_at': datetime.now().isoformat()
+        } for c in all_chunks]
+        
+        self.collection.add(
             ids=ids,
-            embeddings=embeddings,
-            documents=chunks,
+            embeddings=embeddings.tolist(),
+            documents=texts,
             metadatas=metadatas
         )
         
-        return len(chunks)
+        print(f"✓ Indexed {len(all_chunks)} chunks from {len(MEMORY_FILES)} core files + memory/*.md + .learnings/*.md")
+        print(f"  Vault location: {VAULT_DIR}")
     
-    def index_all(self):
-        """Index all memory files."""
-        total = 0
+    def query(self, text: str, n_results: int = 5, full: bool = False, obs_type: str = None) -> list:
+        """Query the memory vault."""
+        self._init_model()
+        self._init_db()
         
-        # Index main files
-        for filepath in MEMORY_FILES:
-            if filepath.exists():
-                count = self.index_file(filepath)
-                print(f"  {filepath.name}: {count} chunks")
-                total += count
+        embedding = self.model.encode([text])[0]
         
-        # Index daily memory files
-        if MEMORY_DIR.exists():
-            for filepath in sorted(MEMORY_DIR.glob("*.md")):
-                count = self.index_file(filepath)
-                print(f"  memory/{filepath.name}: {count} chunks")
-                total += count
-        
-        # Index learnings files (errors, corrections, feature requests)
-        if LEARNINGS_DIR.exists():
-            for filepath in sorted(LEARNINGS_DIR.glob("*.md")):
-                count = self.index_file(filepath)
-                print(f"  .learnings/{filepath.name}: {count} chunks")
-                total += count
-        
-        print(f"\nTotal: {total} chunks indexed")
-        return total
-    
-    def query(self, query_text: str, n_results: int = 5, full: bool = False, 
-              obs_type: str = None) -> list[dict]:
-        """Search memories semantically.
-        
-        Args:
-            query_text: Search query
-            n_results: Max results to return
-            full: If True, return full text. If False, return summaries only (token-efficient)
-            obs_type: Filter by observation type (optional)
-        """
-        model = self._load_model()
-        collection = self._get_collection()
-        
-        # Create query embedding
-        query_embedding = model.encode([query_text]).tolist()
-        
-        # Build where clause
-        where = None
+        where_filter = None
         if obs_type:
-            where = {"type": obs_type}
+            where_filter = {"type": obs_type}
         
-        # Search
-        results = collection.query(
-            query_embeddings=query_embedding,
+        results = self.collection.query(
+            query_embeddings=[embedding.tolist()],
             n_results=n_results,
-            where=where,
+            where=where_filter,
             include=["documents", "metadatas", "distances"]
         )
         
-        # Format results
-        formatted = []
-        for i in range(len(results["ids"][0])):
-            meta = results["metadatas"][0][i]
-            score = 1 - results["distances"][0][i]
-            
+        output = []
+        for i, (doc, meta, dist) in enumerate(zip(
+            results['documents'][0],
+            results['metadatas'][0],
+            results['distances'][0]
+        )):
+            score = 1 - dist  # Convert distance to similarity
             result = {
-                "id": results["ids"][0][i],
-                "score": round(score, 3),
-                "source": Path(meta["source"]).name,
-                "type": meta.get("type", "unknown"),
+                'id': results['ids'][0][i],
+                'score': round(score, 3),
+                'source': meta.get('source', 'unknown'),
+                'headers': meta.get('headers', ''),
             }
-            
             if full:
-                result["text"] = results["documents"][0][i]
+                result['text'] = doc
             else:
-                # Progressive disclosure: summary only (token-efficient)
-                result["summary"] = meta.get("summary", generate_summary(results["documents"][0][i]))
-            
-            formatted.append(result)
+                result['summary'] = meta.get('summary', doc[:100])
+            output.append(result)
         
-        return formatted
+        return output
     
-    def get_by_id(self, doc_id: str) -> dict | None:
-        """Fetch full memory by ID."""
-        collection = self._get_collection()
+    def get_by_id(self, memory_id: str) -> dict:
+        """Get full memory content by ID."""
+        self._init_db()
         
-        result = collection.get(
-            ids=[doc_id],
+        result = self.collection.get(
+            ids=[memory_id],
             include=["documents", "metadatas"]
         )
         
-        if not result["ids"]:
-            return None
-        
-        meta = result["metadatas"][0]
-        return {
-            "id": doc_id,
-            "text": result["documents"][0],
-            "source": meta.get("source", "unknown"),
-            "type": meta.get("type", "unknown"),
-            "indexed_at": meta.get("indexed_at"),
-        }
+        if result['ids']:
+            return {
+                'id': memory_id,
+                'text': result['documents'][0],
+                'metadata': result['metadatas'][0]
+            }
+        return None
     
-    def get_by_ids(self, doc_ids: list[str]) -> list[dict]:
-        """Fetch multiple memories by ID (batch operation)."""
-        collection = self._get_collection()
+    def add_observation(self, text: str, obs_type: str = 'observation', area: str = 'core') -> str:
+        """Add a new observation to the vault."""
+        self._init_model()
+        self._init_db()
         
-        result = collection.get(
-            ids=doc_ids,
-            include=["documents", "metadatas"]
-        )
+        # Generate ID
+        obs_id = hashlib.md5(f"{text}{datetime.now().isoformat()}".encode()).hexdigest()[:12]
         
-        formatted = []
-        for i, doc_id in enumerate(result["ids"]):
-            meta = result["metadatas"][i]
-            formatted.append({
-                "id": doc_id,
-                "text": result["documents"][i],
-                "source": meta.get("source", "unknown"),
-                "type": meta.get("type", "unknown"),
-                "indexed_at": meta.get("indexed_at"),
-            })
+        # Embed
+        embedding = self.model.encode([text])[0]
         
-        return formatted
-    
-    def add_memory(self, text: str, obs_type: str = "observation", source: str = "quick_add") -> str:
-        """Add a typed observation.
-        
-        Args:
-            text: Memory content
-            obs_type: One of: decision, lesson, bugfix, discovery, implementation, observation
-            source: Source label
-        """
-        if obs_type not in VALID_TYPES:
-            print(f"Warning: Unknown type '{obs_type}', using 'observation'", file=sys.stderr)
-            obs_type = "observation"
-        
-        model = self._load_model()
-        collection = self._get_collection()
-        
-        embedding = model.encode([text]).tolist()
-        timestamp = datetime.utcnow()
-        doc_id = f"{obs_type}_{self._hash_content(text)}_{timestamp.strftime('%Y%m%d%H%M%S')}"
-        
-        collection.add(
-            ids=[doc_id],
-            embeddings=embedding,
+        # Add to collection
+        self.collection.add(
+            ids=[obs_id],
+            embeddings=[embedding.tolist()],
             documents=[text],
             metadatas=[{
-                "source": source,
-                "type": obs_type,
-                "summary": generate_summary(text),
-                "indexed_at": timestamp.isoformat(),
+                'source': 'observation',
+                'type': obs_type,
+                'area': area,
+                'summary': text[:100] if len(text) > 100 else text,
+                'indexed_at': datetime.now().isoformat()
             }]
         )
         
-        return doc_id
+        return obs_id
     
-    def delete_by_id(self, doc_id: str) -> bool:
+    def delete_memory(self, memory_id: str) -> bool:
         """Delete a memory by ID."""
-        collection = self._get_collection()
+        self._init_db()
         try:
-            collection.delete(ids=[doc_id])
+            self.collection.delete(ids=[memory_id])
             return True
-        except Exception as e:
-            print(f"Delete failed: {e}", file=sys.stderr)
+        except:
             return False
     
-    def find_similar_pairs(self, threshold: float = 0.85, limit: int = 20) -> list[dict]:
-        """Find pairs of similar memories that could be consolidated.
-        
-        Returns list of: {id1, id2, similarity, summary1, summary2}
-        """
-        collection = self._get_collection()
-        model = self._load_model()
+    def find_similar(self, threshold: float = 0.85) -> list:
+        """Find similar memory pairs for consolidation."""
+        self._init_db()
         
         # Get all memories
-        all_docs = collection.get(include=["documents", "metadatas", "embeddings"])
+        all_data = self.collection.get(include=["documents", "metadatas", "embeddings"])
         
-        if not all_docs["ids"]:
+        if not all_data['ids']:
             return []
         
-        pairs = []
-        ids = all_docs["ids"]
-        docs = all_docs["documents"]
-        metas = all_docs["metadatas"]
+        similar_pairs = []
+        ids = all_data['ids']
+        embeddings = all_data['embeddings']
+        docs = all_data['documents']
         
-        # Compare each pair (expensive but thorough)
+        # Compare all pairs
         import numpy as np
-        embeddings = all_docs.get("embeddings")
+        embeddings_np = np.array(embeddings)
         
-        if embeddings is None or len(embeddings) == 0:
-            # Re-embed if needed
-            embeddings = model.encode(docs).tolist()
-        
-        embeddings = np.array(embeddings)
-        
-        # Compute cosine similarities
-        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-        normalized = embeddings / (norms + 1e-10)
-        similarities = np.dot(normalized, normalized.T)
-        
-        # Find pairs above threshold (excluding self-matches)
         for i in range(len(ids)):
             for j in range(i + 1, len(ids)):
-                sim = similarities[i, j]
+                # Cosine similarity
+                sim = np.dot(embeddings_np[i], embeddings_np[j]) / (
+                    np.linalg.norm(embeddings_np[i]) * np.linalg.norm(embeddings_np[j])
+                )
                 if sim >= threshold:
-                    pairs.append({
-                        "id1": ids[i],
-                        "id2": ids[j],
-                        "similarity": round(float(sim), 3),
-                        "summary1": metas[i].get("summary", docs[i][:50] + "..."),
-                        "summary2": metas[j].get("summary", docs[j][:50] + "..."),
-                        "source1": Path(metas[i].get("source", "unknown")).name,
-                        "source2": Path(metas[j].get("source", "unknown")).name,
+                    similar_pairs.append({
+                        'id1': ids[i],
+                        'id2': ids[j],
+                        'similarity': round(float(sim), 3),
+                        'preview1': docs[i][:80],
+                        'preview2': docs[j][:80]
                     })
         
-        # Sort by similarity descending
-        pairs.sort(key=lambda x: x["similarity"], reverse=True)
-        return pairs[:limit]
+        return sorted(similar_pairs, key=lambda x: -x['similarity'])
     
     def stats(self) -> dict:
         """Get vault statistics."""
-        collection = self._get_collection()
-        count = collection.count()
+        self._init_db()
         
-        # Get type distribution
-        types = {}
+        count = self.collection.count()
+        
+        # Get source distribution
+        all_data = self.collection.get(include=["metadatas"])
         sources = {}
-        all_docs = collection.get(include=["metadatas"])
-        for meta in all_docs["metadatas"]:
-            t = meta.get("type", "unknown")
+        types = {}
+        for meta in all_data['metadatas']:
+            src = meta.get('source', 'unknown')
+            sources[src] = sources.get(src, 0) + 1
+            t = meta.get('type', 'chunk')
             types[t] = types.get(t, 0) + 1
-            s = Path(meta.get("source", "unknown")).name
-            sources[s] = sources.get(s, 0) + 1
         
         return {
-            "total_chunks": count,
-            "by_type": types,
-            "by_source": sources,
+            'total_memories': count,
+            'by_source': sources,
+            'by_type': types,
+            'vault_dir': str(VAULT_DIR),
+            'workspace_dir': str(WORKSPACE_DIR)
         }
 
 
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
-        sys.exit(1)
+        return
     
-    vault = MemoryVault()
     cmd = sys.argv[1]
+    vault = MemoryVault()
     
-    if cmd == "index":
-        print("Indexing memory files...")
-        vault.index_all()
+    if cmd == 'index':
+        vault.index_files()
     
-    elif cmd == "query":
-        # Parse flags
-        full = False
-        obs_type = None
-        args = sys.argv[2:]
-        query_parts = []
+    elif cmd == 'query':
+        full = '--full' in sys.argv
+        type_filter = None
+        for arg in sys.argv:
+            if arg.startswith('--type='):
+                type_filter = arg.split('=')[1]
         
-        i = 0
-        while i < len(args):
-            if args[i] == "--full":
-                full = True
-            elif args[i].startswith("--type="):
-                obs_type = args[i].split("=", 1)[1]
-            elif args[i] == "--type" and i + 1 < len(args):
-                obs_type = args[i + 1]
-                i += 1
+        # Find the query text (last non-flag argument)
+        query_text = None
+        for arg in sys.argv[2:]:
+            if not arg.startswith('--'):
+                query_text = arg
+        
+        if not query_text:
+            print("Usage: vault.py query [--full] [--type=TYPE] \"search text\"")
+            return
+        
+        results = vault.query(query_text, full=full, obs_type=type_filter)
+        for r in results:
+            print(f"\n[{r['id']}] ({r['score']}) {r['source']}")
+            if r.get('headers'):
+                print(f"  📍 {r['headers']}")
+            if full:
+                print(f"  {r['text']}")
             else:
-                query_parts.append(args[i])
-            i += 1
-        
-        if not query_parts:
-            print("Usage: vault.py query [--full] [--type=TYPE] 'search text'")
-            sys.exit(1)
-        
-        query = " ".join(query_parts)
-        results = vault.query(query, full=full, obs_type=obs_type)
-        print(json.dumps(results, indent=2))
+                print(f"  {r['summary']}")
     
-    elif cmd == "get":
+    elif cmd == 'get':
         if len(sys.argv) < 3:
             print("Usage: vault.py get <id> [<id2> ...]")
-            sys.exit(1)
+            return
         
-        ids = sys.argv[2:]
-        if len(ids) == 1:
-            result = vault.get_by_id(ids[0])
+        for mem_id in sys.argv[2:]:
+            result = vault.get_by_id(mem_id)
             if result:
-                print(json.dumps(result, indent=2))
+                print(f"\n=== {result['id']} ===")
+                print(f"Source: {result['metadata'].get('source', 'unknown')}")
+                if result['metadata'].get('headers'):
+                    print(f"Headers: {result['metadata']['headers']}")
+                print(f"\n{result['text']}")
             else:
-                print(f"Not found: {ids[0]}", file=sys.stderr)
-                sys.exit(1)
-        else:
-            results = vault.get_by_ids(ids)
-            print(json.dumps(results, indent=2))
+                print(f"Memory {mem_id} not found")
     
-    elif cmd == "add":
-        # Parse flags
-        obs_type = "observation"
-        args = sys.argv[2:]
-        text_parts = []
+    elif cmd == 'add':
+        obs_type = 'observation'
+        area = 'core'
+        text = None
         
-        i = 0
-        while i < len(args):
-            if args[i].startswith("--type="):
-                obs_type = args[i].split("=", 1)[1]
-            elif args[i] == "--type" and i + 1 < len(args):
-                obs_type = args[i + 1]
-                i += 1
-            else:
-                text_parts.append(args[i])
-            i += 1
+        for arg in sys.argv[2:]:
+            if arg.startswith('--type='):
+                obs_type = arg.split('=')[1]
+            elif arg.startswith('--area='):
+                area = arg.split('=')[1]
+            elif not arg.startswith('--'):
+                text = arg
         
-        if not text_parts:
-            print("Usage: vault.py add [--type=TYPE] 'memory text'")
-            print(f"Types: {', '.join(VALID_TYPES)}")
-            sys.exit(1)
+        if not text:
+            print("Usage: vault.py add [--type=TYPE] [--area=AREA] \"memory text\"")
+            return
         
-        text = " ".join(text_parts)
-        doc_id = vault.add_memory(text, obs_type=obs_type)
-        print(f"Added [{obs_type}]: {doc_id}")
+        obs_id = vault.add_observation(text, obs_type, area)
+        print(f"✓ Added [{obs_id}] ({obs_type}): {text[:50]}...")
     
-    elif cmd == "stats":
-        stats = vault.stats()
-        print(json.dumps(stats, indent=2))
+    elif cmd == 'consolidate':
+        threshold = 0.85
+        for arg in sys.argv[2:]:
+            if arg.startswith('--threshold='):
+                threshold = float(arg.split('=')[1])
+        
+        pairs = vault.find_similar(threshold)
+        if not pairs:
+            print(f"No similar pairs found above {threshold} threshold")
+            return
+        
+        print(f"Found {len(pairs)} similar pairs:\n")
+        for p in pairs:
+            print(f"[{p['id1']}] ↔ [{p['id2']}] (similarity: {p['similarity']})")
+            print(f"  1: {p['preview1']}...")
+            print(f"  2: {p['preview2']}...")
+            print()
     
-    elif cmd == "delete":
+    elif cmd == 'delete':
         if len(sys.argv) < 3:
             print("Usage: vault.py delete <id>")
-            sys.exit(1)
+            return
         
-        doc_id = sys.argv[2]
-        if vault.delete_by_id(doc_id):
-            print(f"Deleted: {doc_id}")
+        mem_id = sys.argv[2]
+        if vault.delete_memory(mem_id):
+            print(f"✓ Deleted {mem_id}")
         else:
-            print(f"Failed to delete: {doc_id}")
-            sys.exit(1)
+            print(f"Failed to delete {mem_id}")
     
-    elif cmd == "consolidate":
-        # Parse flags
-        threshold = 0.85
-        args = sys.argv[2:]
-        
-        for arg in args:
-            if arg.startswith("--threshold="):
-                threshold = float(arg.split("=", 1)[1])
-        
-        print(f"Finding similar memories (threshold: {threshold})...")
-        pairs = vault.find_similar_pairs(threshold=threshold)
-        
-        if not pairs:
-            print("✅ No redundant memories found above threshold")
-        else:
-            print(f"\n🔗 Found {len(pairs)} similar pairs:\n")
-            for p in pairs:
-                print(f"  [{p['similarity']}] {p['source1']} ↔ {p['source2']}")
-                print(f"    1: {p['summary1'][:60]}...")
-                print(f"    2: {p['summary2'][:60]}...")
-                print(f"    IDs: {p['id1']}")
-                print(f"         {p['id2']}")
-                print()
-            
-            print("To merge manually:")
-            print("  1. vmem get <id1> <id2>  # Review full text")
-            print("  2. vmem delete <id>      # Remove redundant")
-            print("  3. vmem add 'merged'     # Add consolidated")
+    elif cmd == 'stats':
+        stats = vault.stats()
+        print(f"📊 Memory Vault Statistics")
+        print(f"   Vault: {stats['vault_dir']}")
+        print(f"   Workspace: {stats['workspace_dir']}")
+        print(f"   Total memories: {stats['total_memories']}")
+        print(f"\n   By source:")
+        for src, count in sorted(stats['by_source'].items(), key=lambda x: -x[1])[:10]:
+            print(f"      {src}: {count}")
+        print(f"\n   By type:")
+        for t, count in sorted(stats['by_type'].items(), key=lambda x: -x[1]):
+            print(f"      {t}: {count}")
     
     else:
         print(f"Unknown command: {cmd}")
         print(__doc__)
-        sys.exit(1)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
