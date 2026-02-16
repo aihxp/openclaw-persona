@@ -155,10 +155,15 @@ sessions_spawn(task=f"{profile}\n\n---\n\nTASK: Research X")
 
 ## Documentation
 
-- [Getting Started](docs/getting-started.md)
-- [Memory System](docs/memory.md)
-- [Agent Profiles](docs/agents.md)
-- [Self-Improvement](docs/self-improvement.md)
+| Guide | Description |
+|-------|-------------|
+| [Quickstart](docs/QUICKSTART.md) | Get running in 5 minutes |
+| [Architecture](docs/ARCHITECTURE.md) | System design, components, data flow |
+| [Memory System](docs/MEMORY-SYSTEM.md) | vmem CLI, indexing, semantic search |
+| [Self-Improvement](docs/SELF-IMPROVEMENT.md) | Learning system, error tracking |
+| [Model Routing](docs/MODEL-ROUTING.md) | Decision tree for model selection |
+| [Identity](docs/IDENTITY.md) | SOUL/USER/personality system |
+| [Configuration](docs/CONFIGURATION.md) | Full config reference |
 
 ## Philosophy
 
