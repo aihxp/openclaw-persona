@@ -7,8 +7,10 @@ import assert from 'node:assert';
 import { execSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
+import { fileURLToPath } from 'url';
 
-const VAULT_SCRIPT = path.resolve(import.meta.dirname, '../memory-vault/vault.py');
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const VAULT_SCRIPT = path.resolve(__dirname, '../memory-vault/vault.py');
 
 describe('memory vault', () => {
   test('vault.py exists', () => {
