@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- `persona vmem help` no longer crashes with Python dependency tracebacks when `chromadb`/`sentence-transformers` are missing.
+- Added clear dependency install guidance for missing Python memory-vault packages.
+- `persona vmem query` now accepts both `--type=value` and `--type value` formats.
+
 ## [0.3.0] - 2026-02-16
 
 ### Added

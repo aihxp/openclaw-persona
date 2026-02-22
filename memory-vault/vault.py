@@ -31,9 +31,10 @@ import re
 from pathlib import Path
 from datetime import datetime
 
-import chromadb
-from chromadb.config import Settings
-from sentence_transformers import SentenceTransformer
+# Optional heavy dependencies are imported lazily so `vmem help` works
+# even when Python ML packages are not installed yet.
+chromadb = None
+SentenceTransformer = None
 
 # Dynamic path resolution
 def get_vault_dir():
@@ -102,6 +103,29 @@ OBSERVATION_TYPES = {
 MEMORY_AREAS = ['core', 'trading', 'infrastructure', 'personal', 'projects']
 
 
+def ensure_dependencies():
+    """Import optional dependencies only when needed."""
+    global chromadb, SentenceTransformer
+    if chromadb is not None and SentenceTransformer is not None:
+        return
+    try:
+        import chromadb as _chromadb
+        from sentence_transformers import SentenceTransformer as _SentenceTransformer
+        chromadb = _chromadb
+        SentenceTransformer = _SentenceTransformer
+    except ModuleNotFoundError as e:
+        missing = e.name or "required package"
+        print(
+            f"❌ Missing Python dependency: {missing}\n"
+            "Install memory-vault requirements with:\n"
+            "  pip install -r memory-vault/requirements.txt\n"
+            "or:\n"
+            "  pip install chromadb sentence-transformers",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 class MemoryVault:
     def __init__(self, lazy_load=True):
         self.model = None
@@ -112,11 +136,13 @@ class MemoryVault:
             self._init_db()
     
     def _init_model(self):
+        ensure_dependencies()
         if self.model is None:
             print("Loading embedding model...", file=sys.stderr)
             self.model = SentenceTransformer('all-MiniLM-L6-v2')
     
     def _init_db(self):
+        ensure_dependencies()
         if self.client is None:
             CHROMA_DIR.mkdir(parents=True, exist_ok=True)
             self.client = chromadb.PersistentClient(path=str(CHROMA_DIR))
@@ -434,13 +460,28 @@ def main():
     elif cmd == 'query':
         full = '--full' in sys.argv
         type_filter = None
-        for arg in sys.argv:
+        argv = sys.argv[2:]
+
+        i = 0
+        while i < len(argv):
+            arg = argv[i]
             if arg.startswith('--type='):
-                type_filter = arg.split('=')[1]
-        
+                type_filter = arg.split('=', 1)[1]
+            elif arg == '--type' and i + 1 < len(argv):
+                type_filter = argv[i + 1]
+                i += 1
+            i += 1
+
         # Find the query text (last non-flag argument)
         query_text = None
-        for arg in sys.argv[2:]:
+        skip_next = False
+        for i, arg in enumerate(argv):
+            if skip_next:
+                skip_next = False
+                continue
+            if arg == '--type':
+                skip_next = True
+                continue
             if not arg.startswith('--'):
                 query_text = arg
         
